@@ -6,31 +6,18 @@ import os
 import random
 import imgaug.augmenters as iaa
 from utils_Progressive import *
-from tqdm import tqdm
-import torchvision
-import torch.nn as nn
-import torch
-import numpy as np
-import torchvision.transforms as transforms
 
 
+# 修改NORM定义为类形式，确保设备兼容性
+class DeviceAwareNormalize:
+    def __init__(self, mean, std):
+        self.mean = torch.tensor(mean).view(1, -1, 1, 1)
+        self.std = torch.tensor(std).view(1, -1, 1, 1)
+    
+    def __call__(self, tensor):
+        return (tensor - self.mean.to(tensor.device)) / self.std.to(tensor.device)
 
-# 假设 BasicConv 类已经在 utils_Progressive 中定义
-class BasicConv(nn.Module):
-    def __init__(self, in_planes, out_planes, kernel_size, stride=1, padding=0, dilation=1, groups=1, relu=True, bn=True, bias=False):
-        super(BasicConv, self).__init__()
-        self.out_channels = out_planes
-        self.conv = nn.Conv2d(in_planes, out_planes, kernel_size=kernel_size, stride=stride, padding=padding, dilation=dilation, groups=groups, bias=bias)
-        self.bn = nn.BatchNorm2d(out_planes,eps=1e-5, momentum=0.01, affine=True) if bn else None
-        self.relu = nn.ReLU() if relu else None
 
-    def forward(self, x):
-        x = self.conv(x)
-        if self.bn is not None:
-            x = self.bn(x)
-        if self.relu is not None:
-            x = self.relu(x)
-        return x
 
 class Features(nn.Module):
     def __init__(self, net_layers):
@@ -44,6 +31,7 @@ class Features(nn.Module):
         self.net_layer_6 = nn.Sequential(*net_layers[6])
         self.net_layer_7 = nn.Sequential(*net_layers[7])
 
+
     def forward(self, x):
         x = self.net_layer_0(x)
         x = self.net_layer_1(x)
@@ -55,36 +43,21 @@ class Features(nn.Module):
         x3 = self.net_layer_7(x2)
         return x1, x2, x3
 
-# 修改 img_progressive 函数以确保返回正确的张量
+
+
 def img_progressive(x, limit, p=0.5):
-    if random.random() < p:
-        # 保存原始形状和设备
-        original_shape = x.shape
-        device = x.device
-
-        # 转换为numpy进行增强
-        x_np = x.cpu().numpy()
-        x_np = np.transpose(x_np, (0, 2, 3, 1))  # BCHW -> BHWC
-
-        # 将数据从 float32 类型转换为 uint8 类型
-        # 因为 imgaug 通常期望输入为 uint8 类型
-        x_np_uint8 = (x_np * 255).astype(np.uint8)
-
-        # 应用亮度增强
-        aug = iaa.MultiplyBrightness((1 - limit, 1 + limit))
-        x_np_augmented = aug(images=x_np_uint8)
-
-        # 将增强后的 uint8 数据转换回 float32 类型
-        x_np = x_np_augmented.astype(np.float32) / 255
-
-        # 转回 PyTorch 张量
-        x = torch.from_numpy(np.transpose(x_np, (0, 3, 1, 2)))  # BHWC -> BCHW
-        x = x.to(device)
-
-        # 确保形状一致
-        assert x.shape == original_shape, f"Shape mismatch: {x.shape} vs {original_shape}"
-
+    if random.random()<p:
+        aug = iaa.MultiplyBrightness((1-limit, 1+limit))
+        x = x.permute(0, 2, 3, 1)
+        x = x.cpu().numpy()
+        x = (x*255).astype(np.uint8)
+        x = aug(images=x)
+        x = torch.from_numpy(x.astype(np.float32)).clone()
+        x = x/255
+        x = x.permute(0, 3, 1, 2)
     return x
+
+
 
 class Network_Wrapper(nn.Module):
     def __init__(self, net_layers):
@@ -163,13 +136,12 @@ class Network_Wrapper(nn.Module):
 
         return x1_c, x2_c, x3_c, x_c_all
 
-def cosine_anneal_schedule(t, T, lr):
-    cos_inner = np.pi * (t % T)
-    cos_inner /= T
-    cos_out = np.cos(cos_inner) + 1
-    return float(lr / 2 * cos_out)
+
+
+
 
 def train(nb_epoch, batch_size, store_name, resume=False, start_epoch=0, model_path=None):
+
     exp_dir = store_name
     try:
         os.stat(exp_dir)
@@ -177,28 +149,21 @@ def train(nb_epoch, batch_size, store_name, resume=False, start_epoch=0, model_p
         os.makedirs(exp_dir)
 
     use_cuda = torch.cuda.is_available()
-    print(f"CUDA available: {use_cuda}")
+    print(use_cuda)
 
     print('==> Preparing data..')
-    # 修改数据预处理
     transform_train = transforms.Compose([
-        transforms.Resize((256, 256)),  # 使用Resize代替Scale
+        transforms.Scale((256, 256)),
         transforms.RandomCrop(224, padding=4),
         transforms.RandomHorizontalFlip(),
         transforms.ToTensor(),
-        transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+        # transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
     ])
-
-    # 使用测试数据集
-    trainset = torchvision.datasets.ImageFolder(root='Image-based Recognition/dataset_test/train',
+    trainset = torchvision.datasets.ImageFolder(root='data/train/new',
                                                 transform=transform_train)
-    trainloader = torch.utils.data.DataLoader(trainset, batch_size=batch_size,
-                                              shuffle=True, num_workers=2)
 
-    print(f"Dataset size: {len(trainset)} images")
-    print(f"Number of batches: {len(trainloader)}")
+    trainloader = torch.utils.data.DataLoader(trainset, batch_size=batch_size, shuffle=True, num_workers=4)
 
-    # 创建模型
     model_name = "skresnext50_32x4d"
     net = timm.create_model(model_name, pretrained=True, num_classes=10).cuda()
 
@@ -210,18 +175,13 @@ def train(nb_epoch, batch_size, store_name, resume=False, start_epoch=0, model_p
     print('Model %s created, param count: %d' %
           ('Created_model', sum([m.numel() for m in net.parameters()])))
 
-    # 设置并行和设备
-    if use_cuda:
-        netp = torch.nn.DataParallel(net).cuda()
-        device = torch.device("cuda")
-    else:
-        netp = net
-        device = torch.device("cpu")
 
+    netp = torch.nn.DataParallel(net).cuda()
+
+    device = torch.device("cuda")
     net.to(device)
     cudnn.benchmark = True
 
-    # 设置损失函数和优化器
     CELoss = nn.CrossEntropyLoss()
     optimizer = optim.SGD([
         {'params': net.classifier_concat.parameters(), 'lr': 0.002},
@@ -235,11 +195,11 @@ def train(nb_epoch, batch_size, store_name, resume=False, start_epoch=0, model_p
     ],
         momentum=0.9, weight_decay=5e-4)
 
-    # 训练循环
-    max_val_acc = 0
-    lr = [0.002, 0.002, 0.002, 0.002, 0.002, 0.002, 0.002, 0.0002]
 
+    max_val_acc = 0
+    lr = [0.002, 0.002, 0.002, 0.002, 0.002, 0.002, 0.002, 0.0002, 0.0002, 0.0002, 0.0002]
     for epoch in range(start_epoch, nb_epoch):
+        print('\nEpoch: %d' % epoch)
         net.train()
         train_loss = 0
         train_loss1 = 0
@@ -249,114 +209,113 @@ def train(nb_epoch, batch_size, store_name, resume=False, start_epoch=0, model_p
         correct = 0
         total = 0
         idx = 0
+        #NORM = transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
+        # 替换原来的NORM定义
+        NORM = DeviceAwareNormalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
 
-        # 使用 tqdm 显示训练进度条
-        pbar = tqdm(enumerate(trainloader), total=len(trainloader))
-        for batch_idx, (inputs, targets) in pbar:
-            # 跳过不完整的批次
-            if inputs.shape[0] < batch_size:
-                continue
+        for batch_idx, (inputs, targets) in enumerate(trainloader):
+            #inputs1 = img_progressive(inputs.clone(), 0.3, p=0.3)
+            #inputs2 = img_progressive(inputs.clone(), 0.2, p=0.3)
+            #inputs3 = img_progressive(inputs.clone(), 0.1, p=0.3)
+
+            inputs1= inputs.clone()
+            inputs2= inputs.clone()
+            inputs3= inputs.clone()
+
+            inputs = NORM(inputs)
+            inputs1 = NORM(inputs1)
+            inputs2 = NORM(inputs2)
+            inputs3 = NORM(inputs3)
+
 
             idx = batch_idx
-
-            # 应用数据增强
-            try:
-                inputs1 = inputs.clone()
-                inputs2 = inputs.clone()
-                inputs3 = inputs.clone()
-
-                # 应用渐进式增强
-                inputs1 = img_progressive(inputs1, 0.3, p=0.3)
-                inputs2 = img_progressive(inputs2, 0.2, p=0.3)
-                inputs3 = img_progressive(inputs3, 0.1, p=0.3)
-
-                # 移动到设备
-                if use_cuda:
-                    inputs = inputs.to(device)
-                    targets = targets.to(device)
-                    inputs1 = inputs1.to(device)
-                    inputs2 = inputs2.to(device)
-                    inputs3 = inputs3.to(device)
-
-                # 更新学习率
-                for nlr in range(len(optimizer.param_groups)):
-                    optimizer.param_groups[nlr]['lr'] = cosine_anneal_schedule(epoch, nb_epoch, lr[nlr])
-
-                # 训练第一个分类器
-                optimizer.zero_grad()
-                output_1, _, _, _ = netp(inputs1)
-                loss1 = CELoss(output_1, targets) * 1
-                loss1.backward()
-                optimizer.step()
-
-                # 训练第二个分类器
-                optimizer.zero_grad()
-                _, output_2, _, _ = netp(inputs2)
-                loss2 = CELoss(output_2, targets) * 1
-                loss2.backward()
-                optimizer.step()
-
-                # 训练第三个分类器
-                optimizer.zero_grad()
-                _, _, output_3, _ = netp(inputs3)
-                loss3 = CELoss(output_3, targets) * 1
-                loss3.backward()
-                optimizer.step()
-
-                # 训练组合分类器
-                optimizer.zero_grad()
-                _, _, _, output_concat = netp(inputs)
-                concat_loss = CELoss(output_concat, targets) * 2
-                concat_loss.backward()
-                optimizer.step()
-
-                # 计算准确率
-                _, predicted = torch.max(output_concat.data, 1)
-                total += targets.size(0)
-                correct += predicted.eq(targets.data).cpu().sum()
-
-                # 累计损失
-                train_loss += (loss1.item() + loss2.item() + loss3.item() + concat_loss.item())
-                train_loss1 += loss1.item()
-                train_loss2 += loss2.item()
-                train_loss3 += loss3.item()
-                train_loss4 += concat_loss.item()
-
-                # 更新进度条信息
-                pbar.set_description(f'Epoch {epoch}: Loss: {train_loss / (batch_idx + 1):.3f}, Acc: {100. * float(correct) / total:.3f}%')
-
-            except Exception as e:
-                print(f"Error in batch {batch_idx}: {e}")
-                import traceback
-                traceback.print_exc()
+            if inputs.shape[0] < batch_size:
                 continue
+            if use_cuda:
+                inputs, targets, inputs1, inputs2, inputs3 = inputs.to(device), targets.to(device), inputs1.to(device), inputs2.to(device), inputs3.to(device)
 
-        # 保存训练结果
-        if idx > 0:  # 确保至少处理了一个批次
-            train_acc = 100. * float(correct) / total
-            train_loss = train_loss / (idx + 1)
-            with open(exp_dir + '/results_train.txt', 'a') as file:
-                file.write(
-                    'Iteration %d | train_acc = %.5f | train_loss = %.5f | Loss1: %.3f | Loss2: %.5f | Loss3: %.5f | Loss_concat: %.5f |\n' % (
-                        epoch, train_acc, train_loss, train_loss1 / (idx + 1), train_loss2 / (idx + 1), train_loss3 / (idx + 1),
-                        train_loss4 / (idx + 1)))
+            inputs, targets , inputs1, inputs2, inputs3 = Variable(inputs), Variable(targets), Variable(inputs1), Variable(inputs2), Variable(inputs3)
 
-        # 保存模型
-        net.cpu()
-        torch.save(net, './' + store_name + '/model.pth')
-        if use_cuda:
+            # update learning rate
+            for nlr in range(len(optimizer.param_groups)):
+                optimizer.param_groups[nlr]['lr'] = cosine_anneal_schedule(epoch, nb_epoch, lr[nlr])
+
+
+            optimizer.zero_grad()
+            output_1, _, _, _ = netp(inputs1)
+            loss1 = CELoss(output_1, targets) * 1
+            loss1.backward()
+            optimizer.step()
+
+            optimizer.zero_grad()
+            _, output_2, _, _ = netp(inputs2)
+            loss2 = CELoss(output_2, targets) * 1
+            loss2.backward()
+            optimizer.step()
+
+            optimizer.zero_grad()
+            _, _, output_3, _ = netp(inputs3)
+            loss3 = CELoss(output_3, targets) * 1
+            loss3.backward()
+            optimizer.step()
+
+            optimizer.zero_grad()
+            _, _, _, output_concat = netp(inputs)
+            concat_loss = CELoss(output_concat, targets) * 2
+            concat_loss.backward()
+            optimizer.step()
+
+            #  training log
+            _, predicted = torch.max(output_concat.data, 1)
+            total += targets.size(0)
+            correct += predicted.eq(targets.data).cpu().sum()
+
+            train_loss += (loss1.item() + loss2.item() + loss3.item() + concat_loss.item())
+            train_loss1 += loss1.item()
+            train_loss2 += loss2.item()
+            train_loss3 += loss3.item()
+            train_loss4 += concat_loss.item()
+
+            if batch_idx % 50 == 0:
+                print(
+                    'Step: %d | Loss1: %.3f | Loss2: %.5f | Loss3: %.5f | Loss_concat: %.5f | Loss: %.3f | Acc: %.3f%% (%d/%d)' % (
+                    batch_idx, train_loss1 / (batch_idx + 1), train_loss2 / (batch_idx + 1),
+                    train_loss3 / (batch_idx + 1), train_loss4 / (batch_idx + 1), train_loss / (batch_idx + 1),
+                    100. * float(correct) / total, correct, total))
+
+        train_acc = 100. * float(correct) / total
+        train_loss = train_loss / (idx + 1)
+        with open(exp_dir + '/results_train.txt', 'a') as file:
+            file.write(
+                'Iteration %d | train_acc = %.5f | train_loss = %.5f | Loss1: %.3f | Loss2: %.5f | Loss3: %.5f | Loss_concat: %.5f |\n' % (
+                epoch, train_acc, train_loss, train_loss1 / (idx + 1), train_loss2 / (idx + 1), train_loss3 / (idx + 1),
+                train_loss4 / (idx + 1)))
+
+        if epoch < 5 or epoch >= 50:
+            val_acc, val_acc_com, val_loss = test(net, CELoss, 8)
+            if val_acc_com > max_val_acc:
+                max_val_acc = val_acc_com
+                net.cpu()
+                torch.save(net, './' + store_name + '/model.pth')
+                net.to(device)
+            with open(exp_dir + '/results_test.txt', 'a') as file:
+                file.write('Iteration %d, test_acc = %.5f, test_acc_combined = %.5f, test_loss = %.6f\n' % (
+                epoch, val_acc, val_acc_com, val_loss))
+        else:
+            net.cpu()
+            torch.save(net, './' + store_name + '/model.pth')
             net.to(device)
 
-        # 打印每个 epoch 的参数情况
-        print(f"Epoch {epoch} completed. Train Loss: {train_loss:.3f}, Train Acc: {train_acc:.3f}%")
+
 
 if __name__ == '__main__':
-    save_path = 'save_teacher_test'
+    save_path = 'save_teacher'
     if not os.path.exists(save_path):
         os.mkdir(save_path)
-    train(nb_epoch=10,        
-          batch_size=8,      #
-          store_name=save_path,
-          resume=False,
-          start_epoch=0,
-          model_path='')
+    train(nb_epoch=300,  # number of epoch
+          batch_size=8,  # batch size
+          store_name=save_path,  # folder for output
+          resume=False,  # resume training from checkpoint
+          start_epoch=0,  # the start epoch number when you resume the training
+          model_path='')  # the saved model where you want to resume the training
+

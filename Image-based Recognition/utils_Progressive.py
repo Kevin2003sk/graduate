@@ -42,7 +42,7 @@ def test(net, criterion, batch_size):
         transforms.ToTensor(),
         transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
     ])
-    testset = torchvision.datasets.ImageFolder(root='<the path to>/test',
+    testset = torchvision.datasets.ImageFolder(root='data/test',
                                                transform=transform_test)
     testloader = torch.utils.data.DataLoader(testset, batch_size=batch_size, shuffle=True, num_workers=4)
 

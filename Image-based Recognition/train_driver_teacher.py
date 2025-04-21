@@ -149,7 +149,7 @@ def train(nb_epoch, batch_size, store_name, resume=False, start_epoch=0, model_p
         transforms.ToTensor(),
         # transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
     ])
-    trainset = torchvision.datasets.ImageFolder(root='Image-based Recognition/dataset/train',
+    trainset = torchvision.datasets.ImageFolder(root='data/train',
                                                 transform=transform_train)
     trainloader = torch.utils.data.DataLoader(trainset, batch_size=batch_size, shuffle=True, num_workers=4)
 
